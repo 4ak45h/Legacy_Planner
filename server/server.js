@@ -2,7 +2,7 @@
     const mongoose = require('mongoose');
     const dotenv = require('dotenv');
     const cors = require('cors');
-    
+    const willRoutes = require('./routes/willRoutes');
     // Import Routes
     const authRoutes = require('./routes/authRoutes');
     const userRoutes = require('./routes/userRoutes');
@@ -32,6 +32,7 @@
     app.use('/api/user', userRoutes);
     app.use('/api/profile', profileRoutes);
     app.use('/api/contacts', contactRoutes); // <-- NEW ROUTE MIDDLEWARE
+    app.use('/api/will', willRoutes);
 
     app.get('/', (req, res) => {
       res.send('Legacy Planner API is running!');

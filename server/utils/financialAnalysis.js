@@ -1,82 +1,98 @@
+const fetch = require('node-fetch'); // Import fetch to call Python API
+
 // **NOTE: Interest Rate Assumption**
-// We'll use a fixed, typical annual interest rate for calculation purposes (e.g., 9% or 0.09)
 const ANNUAL_INTEREST_RATE = 0.09; 
 
-// Helper function to calculate EMI (Equated Monthly Installment)
+// Helper function to calculate EMI
 const calculateEMI = (principal, annualRate, tenureYears) => {
-  const monthlyRate = annualRate / 12; // Monthly interest rate
-  const months = tenureYears * 12; // Total number of months
-
-  if (monthlyRate === 0) return principal / months; // Avoid division by zero if rate is 0
-
-  // EMI Formula: P * R * (1 + R)^N / ((1 + R)^N - 1)
+  const monthlyRate = annualRate / 12;
+  const months = tenureYears * 12;
+  if (monthlyRate === 0 || months === 0) return principal / (months || 1);
   const emi = principal * monthlyRate * Math.pow(1 + monthlyRate, months) / (Math.pow(1 + monthlyRate, months) - 1);
   return emi;
 };
 
+// Helper: Call the Python ML Service
+const getMLPrediction = async (data) => {
+    try {
+        const response = await fetch('http://localhost:5001/predict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        const result = await response.json();
+        return result.success_probability || 0; // Return percentage or 0 on fail
+    } catch (err) {
+        console.error("ML Service Error (is python server running?):", err.message);
+        return null; // Return null if service is down
+    }
+};
+
 /**
- * Main function to perform all calculations and generate analysis.
- * @param {object} profile The user's financial and property profile data.
+ * Main function to perform calculations AND call ML model.
+ * NOTE: This is now an ASYNC function because it calls an external API.
  */
-const runFinancialAnalysis = (profile) => {
+const runFinancialAnalysis = async (profile) => {
   const { 
-    monthlyIncome, monthlyExpenses, currentSavings, existingLoans, creditScore,
+    monthlyIncome, currentSavings, creditScore, monthlyExpensesTotal, budget,
     property: { targetPrice, downPaymentPercentage, desiredTimelineYears }
   } = profile;
 
-  // 1. Calculate Core Metrics
-  const monthlySavingsPotential = monthlyIncome - monthlyExpenses;
+  // 1. Standard Math Calculations
+  const monthlySavingsPotential = monthlyIncome - monthlyExpensesTotal;
   const targetDownPayment = targetPrice * (downPaymentPercentage / 100);
   const loanAmount = targetPrice - targetDownPayment;
+  const estimatedEMI = calculateEMI(loanAmount, ANNUAL_INTEREST_RATE, 20); 
 
-  // We'll assume a standard 20-year loan tenure for EMI calculation
-  const LOAN_TENURE_YEARS = 20; 
-  const estimatedEMI = calculateEMI(loanAmount, ANNUAL_INTEREST_RATE, LOAN_TENURE_YEARS);
-
-  // 2. Calculate Savings Goal
-  // Shortfall in savings needed for down payment
-  const savingsShortfall = targetDownPayment - currentSavings;
-  const monthsToDownPayment = desiredTimelineYears * 12;
-
-  // Monthly savings required to meet the shortfall within the desired timeline
+  const shortfall = targetDownPayment - currentSavings;
+  const monthsToGoal = desiredTimelineYears * 12;
   let monthlySavingsRequired = 0;
-  if (savingsShortfall > 0 && monthsToDownPayment > 0) {
-    monthlySavingsRequired = savingsShortfall / monthsToDownPayment;
+  if (shortfall > 0 && monthsToGoal > 0) {
+    monthlySavingsRequired = shortfall / monthsToGoal;
   }
 
-  // 3. Calculate Affordability Score (Based on key financial ratios)
-  // Ideal Debt-to-Income Ratio (DTI) is < 40%
-  const debtToIncomeRatio = (existingLoans / monthlyIncome) * 100; 
+  // 2. ML Model Prediction
+  // We send exactly what the Python model expects
+  const mlInput = {
+      monthlyIncome,
+      currentSavings,
+      monthlyExpensesTotal,
+      desiredTimelineYears,
+      targetPrice
+  };
+  
+  const mlSuccessScore = await getMLPrediction(mlInput);
 
-  // Calculate total monthly debt (EMI + Existing Loans)
-  const totalMonthlyDebt = estimatedEMI + existingLoans;
+  // 3. Rule-Based Scoring
+  const debtPayments = (budget && budget.debtPayments) ? budget.debtPayments : 0;
+  const totalMonthlyDebt = estimatedEMI + debtPayments;
+  const debtToIncomeRatio = (debtPayments / (monthlyIncome || 1)) * 100;
+  const emiAffordability = (totalMonthlyDebt / (monthlyIncome || 1)) * 100;
 
-  // Check if EMI is affordable based on income (e.g., total debt < 50% of income)
-  const emiAffordability = (totalMonthlyDebt / monthlyIncome) * 100;
+  let ruleScore = 0;
+  if (emiAffordability < 30) ruleScore = 80;
+  else if (emiAffordability < 50) ruleScore = 50;
+  else ruleScore = 20;
 
-  let affordabilityScore = 0;
-  if (emiAffordability < 30) affordabilityScore = 80;
-  else if (emiAffordability < 40) affordabilityScore = 60;
-  else if (emiAffordability < 50) affordabilityScore = 40;
-  else affordabilityScore = 10;
+  // 4. Hybrid Score Calculation
+  // If ML works, weight it 40% vs 60% rule-based. If ML fails, use rules only.
+  let finalScore = ruleScore;
+  if (mlSuccessScore !== null) {
+      finalScore = Math.round((ruleScore * 0.6) + (mlSuccessScore * 0.4));
+  }
+  
+  // 5. Generate Report Text
+  const aiAnalysisMarkdown = generateAnalysis(
+      profile, monthlySavingsPotential, monthlySavingsRequired, 
+      estimatedEMI, debtToIncomeRatio, mlSuccessScore
+  );
 
-  // Credit score adjustment
-  if (creditScore > 780) affordabilityScore += 10;
-  else if (creditScore < 650) affordabilityScore -= 10;
-
-  // Ensure score is between 0 and 100
-  affordabilityScore = Math.max(0, Math.min(100, affordabilityScore));
-
-  // 4. Generate Analysis Text (This mimics the AI output)
-  const aiAnalysisMarkdown = generateAnalysis(profile, monthlySavingsPotential, monthlySavingsRequired, estimatedEMI, debtToIncomeRatio);
-
-  // 5. Return the results
   return {
     analysis: {
-      affordabilityScore: Math.round(affordabilityScore),
+      affordabilityScore: finalScore,
       estimatedEMI: Math.round(estimatedEMI),
       monthlySavingsRequired: Math.round(monthlySavingsRequired),
-      monthlySavingsPotential: Math.round(monthlySavingsPotential), // Include for dashboard
+      monthlySavingsPotential: Math.round(monthlySavingsPotential),
       loanAmount: Math.round(loanAmount),
       targetDownPayment: Math.round(targetDownPayment),
       aiAnalysisMarkdown: aiAnalysisMarkdown,
@@ -84,51 +100,44 @@ const runFinancialAnalysis = (profile) => {
   };
 };
 
-// Function to generate the structured analysis based on metrics
-const generateAnalysis = (profile, msp, msr, emi, dti) => {
+const generateAnalysis = (profile, msp, msr, emi, dti, mlScore) => {
     let analysis = "### Financial Feasibility\n\n";
 
-    // --- Feasibility Section ---
+    // Add ML Insight if available
+    if (mlScore !== null) {
+        analysis += `### 🤖 AI Prediction: ${mlScore}%\n`;
+        analysis += `Our machine learning model calculates a **${mlScore}% probability** of you achieving this goal based on successful profiles with similar income and targets.\n\n---\n\n`;
+    }
+
     const shortfall = profile.property.targetPrice * (profile.downPaymentPercentage / 100) - profile.currentSavings;
+    
     if (shortfall > 0) {
-        analysis += `Based on your current financial situation, purchasing the ${profile.property.name} seems infeasible in the immediate future. Here's why:\n\n`;
-
-        // Down Payment Check
-        analysis += `**Down Payment:** You need **₹${shortfall.toLocaleString('en-IN')}** more in savings to meet the down payment target.\n\n`;
-
-        // EMI Check
+        analysis += `Based on current financials, purchasing ${profile.property.name} requires planning:\n\n`;
+        analysis += `* **Down Payment Gap:** You need **₹${shortfall.toLocaleString('en-IN')}** more.\n`;
+        
         if (emi > (profile.monthlyIncome * 0.4)) {
-            analysis += `**EMI Requirements:** At **₹${Math.round(emi).toLocaleString('en-IN')}** per month, the EMI would be **${((emi / profile.monthlyIncome) * 100).toFixed(1)}%** of your monthly income (**₹${profile.monthlyIncome.toLocaleString('en-IN')}**). This is beyond the comfortable limit.\n\n`;
+            analysis += `* **EMI Warning:** Estimated EMI is **₹${Math.round(emi).toLocaleString('en-IN')}**, which is high relative to income.\n`;
         }
-        // DTI Check
-        analysis += `**Debt-to-Income Ratio:** At **${dti.toFixed(1)}%**, your current DTI is high (ideal is below 40%), which may affect loan approval.\n\n`;
-
     } else {
-        analysis += `Your profile shows excellent financial stability. You have sufficient savings for the down payment and a healthy income to support the loan.\n\n`;
+        analysis += `✅ **Strong Position:** You have sufficient savings for the down payment.\n`;
     }
 
-    // --- Savings Strategy Section ---
-    analysis += "\n\n### Savings Strategy\n\n";
+    analysis += "\n### Savings Strategy\n\n";
     if (msr > 0) {
-        analysis += `To achieve your goal in ${profile.property.desiredTimelineYears} years, you need to save **₹${msr.toLocaleString('en-IN')}** monthly.\n\n`;
-        analysis += `1. **Target Savings:** Aim to save **₹${msr.toLocaleString('en-IN')}** monthly, which is **${((msr / msp) * 100).toFixed(1)}%** of your current saving potential.\n\n`;
+        analysis += `1. **Target:** Save **₹${msr.toLocaleString('en-IN')}** monthly to reach your goal in ${profile.property.desiredTimelineYears} years.\n`;
+        analysis += `2. **Current Potential:** You currently save about **₹${msp.toLocaleString('en-IN')}** per month.\n`;
     } else {
-        analysis += `1. **Actionable Step:** Since you already have enough saved for the down payment, focus on building an emergency fund or increasing your investment portfolio.\n\n`;
+        analysis += `1. **Invest:** Focus on investing your surplus savings for better returns.\n`;
     }
 
-    // --- Actionable Steps Section ---
-    analysis += "\n\n### Actionable Steps\n\n";
-    analysis += `1. **Increase Income:** Seek opportunities for salary increments or additional side jobs.\n`;
-    analysis += `2. **Budget Refinement:** Cut unnecessary expenses and channel funds towards savings.\n`;
+    analysis += "\n### Actionable Steps\n\n";
+    analysis += `1. **Budget:** Check your 'Debt Payments' and 'Entertainment' categories in the budget tool.\n`;
     if (dti > 40) {
-         analysis += `3. **Debt Repayment:** Prioritize clearing existing loans to reduce your financial burden.\n`;
+         analysis += `2. **Debt:** Your Debt-to-Income ratio (${dti.toFixed(1)}%) is high. Prioritize paying off existing loans.\n`;
     }
-
-    analysis += `4. **Build Credit:** Improve your score (currently ${profile.creditScore}) for better loan terms.\n`;
-
+    analysis += `3. **Credit:** Keep your score above 750 for the best home loan rates.\n`;
 
     return analysis;
 };
-
 
 module.exports = { runFinancialAnalysis };
