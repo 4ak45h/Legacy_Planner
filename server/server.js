@@ -1,4 +1,4 @@
-    const express = require('express');
+const express = require('express');
     const mongoose = require('mongoose');
     const dotenv = require('dotenv');
     const cors = require('cors');
@@ -8,7 +8,8 @@
     const userRoutes = require('./routes/userRoutes');
     const profileRoutes = require('./routes/profileRoutes');
     const contactRoutes = require('./routes/contactRoutes'); // <-- NEW IMPORT
-
+    const ledgerRoutes = require('./routes/ledgerRoutes');
+    
     dotenv.config();
 
     const app = express();
@@ -33,6 +34,7 @@
     app.use('/api/profile', profileRoutes);
     app.use('/api/contacts', contactRoutes); // <-- NEW ROUTE MIDDLEWARE
     app.use('/api/will', willRoutes);
+    app.use('/api/ledger', ledgerRoutes);
 
     app.get('/', (req, res) => {
       res.send('Legacy Planner API is running!');
@@ -41,4 +43,3 @@
     app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
     });
-    

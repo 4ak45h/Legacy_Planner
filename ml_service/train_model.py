@@ -5,52 +5,60 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 import joblib
 
-# 1. Generate Synthetic Data
-# We create 1000 dummy user profiles
+# Set seed for reproducibility
 np.random.seed(42)
-n_samples = 1000
+n_samples = 1500 # Using more samples for better training
 
+# 1. Generate Synthetic Data
+# We create 1500 dummy user profiles based on standard ranges
 data = {
-    'income': np.random.normal(100000, 30000, n_samples), # Avg income 100k
-    'savings': np.random.normal(500000, 200000, n_samples), # Avg savings 500k
-    'expenses': np.random.normal(40000, 10000, n_samples), # Avg expenses 40k
-    'loan_term': np.random.choice([5, 10, 15, 20], n_samples),
-    'target_price': np.random.normal(5000000, 1000000, n_samples) # Avg target 50L
+    'income': np.random.normal(120000, 40000, n_samples), # Avg monthly income 1.2L
+    'savings': np.random.normal(600000, 250000, n_samples), # Avg current savings 6L
+    'expenses': np.random.normal(50000, 15000, n_samples), # Avg monthly expenses 50k
+    'timeline': np.random.choice([3, 5, 7, 10], n_samples), # Desired Goal Timeline
+    'target_price': np.random.normal(6000000, 1500000, n_samples) # Avg target 60L
 }
 
 df = pd.DataFrame(data)
 
 # Feature Engineering: Create meaningful ratios
-# Success depends on: High Savings Rate, Low Expense Ratio
 df['savings_rate'] = (df['income'] - df['expenses']) / df['income']
-df['affordability'] = df['savings'] / (df['target_price'] * 0.2) # Can they afford 20% down?
+# Calculate required down payment (20% default)
+df['required_downpayment'] = df['target_price'] * 0.2
+# Affordability ratio: current savings vs. required down payment
+df['affordability_ratio'] = df['savings'] / df['required_downpayment']
+# Savings momentum ratio: how quickly they can save the remaining amount
+df['momentum_ratio'] = (df['required_downpayment'] - df['savings']) / (df['income'] - df['expenses'])
 
 # Define Logic for "Success" (Label)
-# If they can save > 30% of income AND afford > 50% of down payment already -> Success
-# We add some random noise to make it realistic (not perfect rule-based)
+# Success is high if: High Savings Rate (over 40%) AND they can cover the down payment quickly (momentum < 3 years)
 df['success'] = (
-    (df['savings_rate'] > 0.3) & 
-    (df['affordability'] > 0.5)
+    (df['savings_rate'] > 0.4) & 
+    (df['affordability_ratio'] > 0.3) & # Already 30% of the way there
+    (df['momentum_ratio'] < (3 * 12)) # Can cover the rest in < 3 years
 ).astype(int)
 
-# Add noise: Flip 5% of labels to simulate real-world unpredictability
-noise_indices = np.random.choice(n_samples, int(n_samples * 0.05), replace=False)
+# Add small noise: Flip 8% of labels to simulate real-world factors (unpredictability)
+noise_indices = np.random.choice(n_samples, int(n_samples * 0.08), replace=False)
 df.loc[noise_indices, 'success'] = 1 - df.loc[noise_indices, 'success']
 
 # 2. Train the Model
-X = df[['income', 'savings', 'expenses', 'loan_term', 'target_price']]
+# Features used for prediction (must match what the Flask API receives)
+X = df[['income', 'savings', 'expenses', 'timeline', 'target_price']]
 y = df['success']
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-model = RandomForestClassifier(n_estimators=100, random_state=42)
+# Using Random Forest Classifier for robust prediction
+model = RandomForestClassifier(n_estimators=150, max_depth=8, random_state=42)
 model.fit(X_train, y_train)
 
-# Evaluate
+# 3. Evaluate and Save
 predictions = model.predict(X_test)
 accuracy = accuracy_score(y_test, predictions)
 print(f"Model Training Complete. Accuracy: {accuracy:.2f}")
 
-# 3. Save the Model
+# Save the trained model object using joblib
 joblib.dump(model, 'success_predictor_model.pkl')
 print("Model saved to success_predictor_model.pkl")
+

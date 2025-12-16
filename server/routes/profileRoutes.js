@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const FinancialProfile = require('../models/FinancialProfile');
-const { runFinancialAnalysis } = require('../utils/financialAnalysis');
+const { runFinancialAnalysis } = require('../utils/financialAnalysis'); // NOTE: This is the async function now
 
 // @route   POST /api/profile
 // @desc    Create or Update Financial Profile and Run Analysis (PROTECTED)
@@ -29,8 +29,7 @@ router.post('/', auth, async (req, res) => {
         }
         
         // --- 3. Run Analysis (CRITICAL CHANGE: Added AWAIT) ---
-        // We pass the modified req.body (which includes the new total)
-        // You MUST add 'await' here because runFinancialAnalysis is now an async function
+        // We must await this function as it makes an external call to the Python ML server
         const analysisResults = await runFinancialAnalysis(req.body); 
 
         // Combine the submitted data (including budget) with the calculated total and analysis
@@ -70,6 +69,7 @@ router.post('/', auth, async (req, res) => {
         res.status(500).send('Server Error during profile update.');
     }
 });
+
 
 // @route   GET /api/profile/me
 // @desc    Get current user's financial profile (PROTECTED)
@@ -201,4 +201,3 @@ router.post('/chat', auth, async (req, res) => {
 
 
 module.exports = router;
-

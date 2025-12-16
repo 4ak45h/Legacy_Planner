@@ -1,15 +1,13 @@
 const fetch = require('node-fetch'); // Import fetch to call Python API
 
-// **NOTE: Interest Rate Assumption**
 const ANNUAL_INTEREST_RATE = 0.09; 
 
-// Helper function to calculate EMI
+// Helper function to calculate EMI (Keep existing math functions)
 const calculateEMI = (principal, annualRate, tenureYears) => {
   const monthlyRate = annualRate / 12;
   const months = tenureYears * 12;
   if (monthlyRate === 0 || months === 0) return principal / (months || 1);
-  const emi = principal * monthlyRate * Math.pow(1 + monthlyRate, months) / (Math.pow(1 + monthlyRate, months) - 1);
-  return emi;
+  return (principal * monthlyRate * Math.pow(1 + monthlyRate, months)) / (Math.pow(1 + monthlyRate, months) - 1);
 };
 
 // Helper: Call the Python ML Service
@@ -30,7 +28,7 @@ const getMLPrediction = async (data) => {
 
 /**
  * Main function to perform calculations AND call ML model.
- * NOTE: This is now an ASYNC function because it calls an external API.
+ * NOTE: This is now an ASYNC function.
  */
 const runFinancialAnalysis = async (profile) => {
   const { 
@@ -52,7 +50,6 @@ const runFinancialAnalysis = async (profile) => {
   }
 
   // 2. ML Model Prediction
-  // We send exactly what the Python model expects
   const mlInput = {
       monthlyIncome,
       currentSavings,
@@ -61,12 +58,11 @@ const runFinancialAnalysis = async (profile) => {
       targetPrice
   };
   
-  const mlSuccessScore = await getMLPrediction(mlInput);
+  const mlScore = await getMLPrediction(mlInput); // Await the prediction
 
   // 3. Rule-Based Scoring
   const debtPayments = (budget && budget.debtPayments) ? budget.debtPayments : 0;
   const totalMonthlyDebt = estimatedEMI + debtPayments;
-  const debtToIncomeRatio = (debtPayments / (monthlyIncome || 1)) * 100;
   const emiAffordability = (totalMonthlyDebt / (monthlyIncome || 1)) * 100;
 
   let ruleScore = 0;
@@ -75,16 +71,16 @@ const runFinancialAnalysis = async (profile) => {
   else ruleScore = 20;
 
   // 4. Hybrid Score Calculation
-  // If ML works, weight it 40% vs 60% rule-based. If ML fails, use rules only.
   let finalScore = ruleScore;
-  if (mlSuccessScore !== null) {
-      finalScore = Math.round((ruleScore * 0.6) + (mlSuccessScore * 0.4));
+  if (mlScore !== null) {
+      // 50% weight to AI, 50% to Rule for the final Affordability Score
+      finalScore = Math.round((ruleScore * 0.5) + (mlScore * 0.5));
   }
   
   // 5. Generate Report Text
   const aiAnalysisMarkdown = generateAnalysis(
       profile, monthlySavingsPotential, monthlySavingsRequired, 
-      estimatedEMI, debtToIncomeRatio, mlSuccessScore
+      estimatedEMI, debtPayments, mlScore
   );
 
   return {
@@ -100,20 +96,21 @@ const runFinancialAnalysis = async (profile) => {
   };
 };
 
-const generateAnalysis = (profile, msp, msr, emi, dti, mlScore) => {
-    let analysis = "### Financial Feasibility\n\n";
+const generateAnalysis = (profile, msp, msr, emi, debt, mlScore) => {
+    let analysis = "";
 
-    // Add ML Insight if available
+    // Add ML Insight at the very top if available
     if (mlScore !== null) {
-        analysis += `### 🤖 AI Prediction: ${mlScore}%\n`;
-        analysis += `Our machine learning model calculates a **${mlScore}% probability** of you achieving this goal based on successful profiles with similar income and targets.\n\n---\n\n`;
+        analysis += `### 📈 AI Success Prediction\n`;
+        analysis += `Our machine learning model calculates a **${mlScore}% probability** of you achieving this property goal based on successful profiles with similar finances. \n\n---\n\n`;
     }
+
+    analysis += "### Financial Feasibility\n\n";
 
     const shortfall = profile.property.targetPrice * (profile.downPaymentPercentage / 100) - profile.currentSavings;
     
     if (shortfall > 0) {
-        analysis += `Based on current financials, purchasing ${profile.property.name} requires planning:\n\n`;
-        analysis += `* **Down Payment Gap:** You need **₹${shortfall.toLocaleString('en-IN')}** more.\n`;
+        analysis += `You have a down payment shortfall of **₹${shortfall.toLocaleString('en-IN')}**.\n`;
         
         if (emi > (profile.monthlyIncome * 0.4)) {
             analysis += `* **EMI Warning:** Estimated EMI is **₹${Math.round(emi).toLocaleString('en-IN')}**, which is high relative to income.\n`;
@@ -131,9 +128,9 @@ const generateAnalysis = (profile, msp, msr, emi, dti, mlScore) => {
     }
 
     analysis += "\n### Actionable Steps\n\n";
-    analysis += `1. **Budget:** Check your 'Debt Payments' and 'Entertainment' categories in the budget tool.\n`;
-    if (dti > 40) {
-         analysis += `2. **Debt:** Your Debt-to-Income ratio (${dti.toFixed(1)}%) is high. Prioritize paying off existing loans.\n`;
+    analysis += `1. **Budget:** Check your detailed budget (Housing, Food, Entertainment).\n`;
+    if (debt > 0) {
+         analysis += `2. **Debt:** You have existing debt payments of ₹${debt.toLocaleString('en-IN')} recorded. Prioritize paying these off.\n`;
     }
     analysis += `3. **Credit:** Keep your score above 750 for the best home loan rates.\n`;
 
