@@ -1,86 +1,103 @@
-const fetch = require('node-fetch'); // Import fetch to call Python API
+const fetch = require('node-fetch');
 
-const ANNUAL_INTEREST_RATE = 0.09; 
+const ANNUAL_INTEREST_RATE = 0.09;
 
-// Helper function to calculate EMI (Keep existing math functions)
+// Appreciation scenarios (IMPORTANT ADDITION)
+const SCENARIO_RATES = {
+  conservative: 0.05,
+  expected: 0.07,
+  aggressive: 0.10
+};
+
+// ================= EMI CALCULATION =================
 const calculateEMI = (principal, annualRate, tenureYears) => {
   const monthlyRate = annualRate / 12;
   const months = tenureYears * 12;
   if (monthlyRate === 0 || months === 0) return principal / (months || 1);
-  return (principal * monthlyRate * Math.pow(1 + monthlyRate, months)) / (Math.pow(1 + monthlyRate, months) - 1);
+  return (
+    (principal * monthlyRate * Math.pow(1 + monthlyRate, months)) /
+    (Math.pow(1 + monthlyRate, months) - 1)
+  );
 };
 
-// Helper: Call the Python ML Service
+// ================= ML SERVICE =================
 const getMLPrediction = async (data) => {
-    try {
-        const response = await fetch('http://localhost:5001/predict', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-        const result = await response.json();
-        return result.success_probability || 0; // Return percentage or 0 on fail
-    } catch (err) {
-        console.error("ML Service Error (is python server running?):", err.message);
-        return null; // Return null if service is down
-    }
+  try {
+    const response = await fetch('http://localhost:5001/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    const result = await response.json();
+    return result.success_probability || null;
+  } catch (err) {
+    console.error('ML Service Error:', err.message);
+    return null;
+  }
 };
 
-/**
- * Main function to perform calculations AND call ML model.
- * NOTE: This is now an ASYNC function.
- */
+// ================= MAIN ANALYSIS =================
 const runFinancialAnalysis = async (profile) => {
-  const { 
-    monthlyIncome, currentSavings, creditScore, monthlyExpensesTotal, budget,
+  const {
+    monthlyIncome,
+    currentSavings,
+    creditScore,
+    monthlyExpensesTotal,
+    budget,
     property: { targetPrice, downPaymentPercentage, desiredTimelineYears }
   } = profile;
 
-  // 1. Standard Math Calculations
+  // ===== 1. PRICE PROJECTION (NEW) =====
+  const priceScenarios = {
+    conservative: targetPrice * Math.pow(1 + SCENARIO_RATES.conservative, desiredTimelineYears),
+    expected: targetPrice * Math.pow(1 + SCENARIO_RATES.expected, desiredTimelineYears),
+    aggressive: targetPrice * Math.pow(1 + SCENARIO_RATES.aggressive, desiredTimelineYears)
+  };
+
+  // Use EXPECTED price for all planning math
+  const projectedPrice = priceScenarios.expected;
+
+  // ===== 2. BASIC CALCULATIONS =====
   const monthlySavingsPotential = monthlyIncome - monthlyExpensesTotal;
-  const targetDownPayment = targetPrice * (downPaymentPercentage / 100);
-  const loanAmount = targetPrice - targetDownPayment;
-  const estimatedEMI = calculateEMI(loanAmount, ANNUAL_INTEREST_RATE, 20); 
+  const targetDownPayment = projectedPrice * (downPaymentPercentage / 100);
+  const loanAmount = projectedPrice - targetDownPayment;
+  const estimatedEMI = calculateEMI(loanAmount, ANNUAL_INTEREST_RATE, 20);
 
   const shortfall = targetDownPayment - currentSavings;
   const monthsToGoal = desiredTimelineYears * 12;
-  let monthlySavingsRequired = 0;
-  if (shortfall > 0 && monthsToGoal > 0) {
-    monthlySavingsRequired = shortfall / monthsToGoal;
-  }
+  const monthlySavingsRequired =
+    shortfall > 0 && monthsToGoal > 0 ? shortfall / monthsToGoal : 0;
 
-  // 2. ML Model Prediction
-  const mlInput = {
-      monthlyIncome,
-      currentSavings,
-      monthlyExpensesTotal,
-      desiredTimelineYears,
-      targetPrice
-  };
-  
-  const mlScore = await getMLPrediction(mlInput); // Await the prediction
+  // ===== 3. ML MODEL =====
+  const mlScore = await getMLPrediction({
+    monthlyIncome,
+    currentSavings,
+    monthlyExpensesTotal,
+    desiredTimelineYears,
+    targetPrice: projectedPrice
+  });
 
-  // 3. Rule-Based Scoring
-  const debtPayments = (budget && budget.debtPayments) ? budget.debtPayments : 0;
+  // ===== 4. RULE-BASED SCORE =====
+  const debtPayments = budget?.debtPayments || 0;
   const totalMonthlyDebt = estimatedEMI + debtPayments;
-  const emiAffordability = (totalMonthlyDebt / (monthlyIncome || 1)) * 100;
+  const emiRatio = (totalMonthlyDebt / (monthlyIncome || 1)) * 100;
 
-  let ruleScore = 0;
-  if (emiAffordability < 30) ruleScore = 80;
-  else if (emiAffordability < 50) ruleScore = 50;
-  else ruleScore = 20;
+  let ruleScore = 20;
+  if (emiRatio < 30) ruleScore = 80;
+  else if (emiRatio < 50) ruleScore = 50;
 
-  // 4. Hybrid Score Calculation
-  let finalScore = ruleScore;
-  if (mlScore !== null) {
-      // 50% weight to AI, 50% to Rule for the final Affordability Score
-      finalScore = Math.round((ruleScore * 0.5) + (mlScore * 0.5));
-  }
-  
-  // 5. Generate Report Text
+  const finalScore =
+    mlScore !== null ? Math.round(ruleScore * 0.5 + mlScore * 0.5) : ruleScore;
+
+  // ===== 5. REPORT =====
   const aiAnalysisMarkdown = generateAnalysis(
-      profile, monthlySavingsPotential, monthlySavingsRequired, 
-      estimatedEMI, debtPayments, mlScore
+    profile,
+    monthlySavingsPotential,
+    monthlySavingsRequired,
+    estimatedEMI,
+    debtPayments,
+    mlScore,
+    priceScenarios
   );
 
   return {
@@ -91,50 +108,58 @@ const runFinancialAnalysis = async (profile) => {
       monthlySavingsPotential: Math.round(monthlySavingsPotential),
       loanAmount: Math.round(loanAmount),
       targetDownPayment: Math.round(targetDownPayment),
-      aiAnalysisMarkdown: aiAnalysisMarkdown,
-    },
+      priceProjection: {
+        currentPrice: Math.round(targetPrice),
+        conservative: Math.round(priceScenarios.conservative),
+        expected: Math.round(priceScenarios.expected),
+        aggressive: Math.round(priceScenarios.aggressive),
+        appreciationRates: { conservative: 5, expected: 7, aggressive: 10 }
+      },
+      aiAnalysisMarkdown
+    }
   };
 };
 
-const generateAnalysis = (profile, msp, msr, emi, debt, mlScore) => {
-    let analysis = "";
+// ================= REPORT GENERATOR =================
+const generateAnalysis = (
+  profile,
+  msp,
+  msr,
+  emi,
+  debt,
+  mlScore,
+  scenarios
+) => {
+  let analysis = '';
 
-    // Add ML Insight at the very top if available
-    if (mlScore !== null) {
-        analysis += `### 📈 AI Success Prediction\n`;
-        analysis += `Our machine learning model calculates a **${mlScore}% probability** of you achieving this property goal based on successful profiles with similar finances. \n\n---\n\n`;
-    }
+  if (mlScore !== null) {
+    analysis += `### 📈 AI Success Prediction\n`;
+    analysis += `Based on similar financial profiles, the AI predicts a **${mlScore}% probability** of achieving this property goal.\n\n---\n\n`;
+  }
 
-    analysis += "### Financial Feasibility\n\n";
+  analysis += `### 📊 Land Price Growth Scenarios\n`;
+  analysis += `The system evaluates multiple appreciation scenarios to avoid assuming static land prices:\n\n`;
+  analysis += `• **Conservative (5%)**: ₹${Math.round(scenarios.conservative).toLocaleString('en-IN')}\n`;
+  analysis += `• **Expected (7%)**: ₹${Math.round(scenarios.expected).toLocaleString('en-IN')}\n`;
+  analysis += `• **Aggressive (10%)**: ₹${Math.round(scenarios.aggressive).toLocaleString('en-IN')}\n\n`;
+  analysis += `All financial planning calculations are based on the **Expected growth scenario**.\n\n---\n\n`;
 
-    const shortfall = profile.property.targetPrice * (profile.downPaymentPercentage / 100) - profile.currentSavings;
-    
-    if (shortfall > 0) {
-        analysis += `You have a down payment shortfall of **₹${shortfall.toLocaleString('en-IN')}**.\n`;
-        
-        if (emi > (profile.monthlyIncome * 0.4)) {
-            analysis += `* **EMI Warning:** Estimated EMI is **₹${Math.round(emi).toLocaleString('en-IN')}**, which is high relative to income.\n`;
-        }
-    } else {
-        analysis += `✅ **Strong Position:** You have sufficient savings for the down payment.\n`;
-    }
+  analysis += `### 💰 Savings Strategy\n`;
+  if (msr > 0) {
+    analysis += `You need to save **₹${Math.round(msr).toLocaleString('en-IN')} per month** to reach your goal in ${profile.property.desiredTimelineYears} years.\n`;
+    analysis += `Your current savings capacity is **₹${Math.round(msp).toLocaleString('en-IN')} per month**.\n`;
+  } else {
+    analysis += `You already have sufficient savings for the down payment.\n`;
+  }
 
-    analysis += "\n### Savings Strategy\n\n";
-    if (msr > 0) {
-        analysis += `1. **Target:** Save **₹${msr.toLocaleString('en-IN')}** monthly to reach your goal in ${profile.property.desiredTimelineYears} years.\n`;
-        analysis += `2. **Current Potential:** You currently save about **₹${msp.toLocaleString('en-IN')}** per month.\n`;
-    } else {
-        analysis += `1. **Invest:** Focus on investing your surplus savings for better returns.\n`;
-    }
+  analysis += `\n### 🧾 Actionable Steps\n`;
+  analysis += `• Review your monthly budget and reduce discretionary expenses.\n`;
+  if (debt > 0) {
+    analysis += `• Prioritize clearing existing debt of ₹${debt.toLocaleString('en-IN')}.\n`;
+  }
+  analysis += `• Maintain a credit score above 750 for better loan terms.\n`;
 
-    analysis += "\n### Actionable Steps\n\n";
-    analysis += `1. **Budget:** Check your detailed budget (Housing, Food, Entertainment).\n`;
-    if (debt > 0) {
-         analysis += `2. **Debt:** You have existing debt payments of ₹${debt.toLocaleString('en-IN')} recorded. Prioritize paying these off.\n`;
-    }
-    analysis += `3. **Credit:** Keep your score above 750 for the best home loan rates.\n`;
-
-    return analysis;
+  return analysis;
 };
 
 module.exports = { runFinancialAnalysis };

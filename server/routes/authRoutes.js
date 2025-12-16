@@ -4,22 +4,60 @@ const User = require('../models/User');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
+
+// Email validation regex
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Password validation regex
+// Minimum 8 chars, 1 uppercase, 1 lowercase, 1 number
+const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
+
 // @route   POST /api/auth/register
 // @desc    Register a new user
 router.post('/register', async (req, res) => {
   const { email, password } = req.body;
+
+  // 🔐 VALIDATIONS
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({
+      msg: 'Please enter a valid email address.'
+    });
+  }
+
+  if (!passwordRegex.test(password)) {
+    return res.status(400).json({
+      msg: 'Password must be at least 8 characters long and include uppercase, lowercase, and a number.'
+    });
+  }
+
   try {
     let user = await User.findOne({ email });
     if (user) {
       return res.status(400).json({ msg: 'User already exists' });
     }
-    user = new User({ email, password });
-    await user.save();
-    const payload = { user: { id: user.id } };
-    jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: 360000 }, (err, token) => {
-      if (err) throw err;
-      res.json({ token });
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    user = new User({
+      email,
+      password: hashedPassword
     });
+
+    await user.save();
+
+    const payload = { user: { id: user.id } };
+
+    jwt.sign(
+      payload,
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' },
+      (err, token) => {
+        if (err) throw err;
+        res.json({ token });
+      }
+    );
+
   } catch (err) {
     console.error(err.message);
     res.status(500).send('Server Error');
